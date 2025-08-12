@@ -10,9 +10,10 @@ import { ICollarTakerNFT } from "./interfaces/ICollarTakerNFT.sol";
 import { ICollarProviderNFT } from "./interfaces/ICollarProviderNFT.sol";
 
 /**
- * @title CollarTakerNFT
+ * @title CollarTakerNFT 
  * @custom:security-contact security@collarprotocol.xyz
- *
+ * 期权买方合约 借款人角色
+ * 买入Put期权：借款人获得下行保护. 卖出Call期权：借款人限制上行收益，但获得期权费（通过锁定更多现金资产）
  * Main Functionality:
  * 1. Manages the taker side of collar positions - handling position creation and settlement.
  * 2. Mints NFTs representing taker positions, allowing cancellations, rolls,
@@ -132,6 +133,14 @@ contract CollarTakerNFT is ICollarTakerNFT, BaseNFT, ReentrancyGuard {
         uint callRange = callStrikePercent - BIPS_BASE;
         // proportionally scaled according to ranges. Will div-zero panic for 0 putRange.
         // rounds down against of taker to prevent taker abuse by opening small positions
+
+        // 按比例缩放，确保双方风险平衡
+        /**
+        如果putStrikePercent = 80%（LTV），callStrikePercent = 110%
+        putRange = 100% - 80% = 20%
+        callRange = 110% - 100% = 10%
+        providerLocked = takerLocked × 10% / 20% = takerLocked × 0.5
+         */
         return takerLocked * callRange / putRange;
     }
 
@@ -430,6 +439,7 @@ contract CollarTakerNFT is ICollarTakerNFT, BaseNFT, ReentrancyGuard {
         takerBalance = position.takerLocked;
         // endPrice == startPrice is no-op in both branches
         if (endPrice < startPrice) {
+            // 价格下跌： taker的锁定资金在taker和provider之间分配
             // takerLocked: divided between taker and provider
             // providerLocked: all goes to provider
             uint providerGainRange = startPrice - endPrice;
@@ -438,6 +448,7 @@ contract CollarTakerNFT is ICollarTakerNFT, BaseNFT, ReentrancyGuard {
             takerBalance -= providerGain;
             providerDelta = providerGain.toInt256();
         } else {
+            // 价格上涨：provider的锁定资金在taker和provider之间分配
             // takerLocked: all goes to taker
             // providerLocked: divided between taker and provider
             uint takerGainRange = endPrice - startPrice;

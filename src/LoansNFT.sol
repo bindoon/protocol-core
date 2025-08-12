@@ -113,7 +113,7 @@ contract LoansNFT is ILoansNFT, BaseNFT {
     // ----- User / Keeper methods ----- //
 
     /**
-     * @notice Opens a new loan by providing underlying and borrowing against it (without using escrow)
+    * @notice Opens a new loan by providing underlying and borrowing against it (without using escrow)
      *      1. Transfers underlying from the user to this contract
      *      2. Swaps underlying for cash
      *      3. Opens a loan position using the CollarTakerNFT contract
@@ -129,14 +129,34 @@ contract LoansNFT is ILoansNFT, BaseNFT {
      * @return loanId The ID of the minted NFT representing the loan
      * @return providerId The ID of the minted CollarProviderNFT paired with this loan
      * @return loanAmount The actual amount of the loan opened in cash asset
+     
+     * @notice 开启新的标准借贷（不使用托管）
+     *      1. 从用户转移underlying资产到合约
+     *      2. 将underlying交换为cash
+     *      3. 使用CollarTakerNFT合约开启借贷头寸
+     *      4. 将借到的金额转移给用户
+     *      5. 将铸造的NFT转移给用户
+     * @param underlyingAmount 提供的underlying资产数量
+     * @param minLoanAmount 可接受的最小借贷金额（滑点保护）
+     * @param swapParams 交换参数结构体，包含：
+     *     - 从underlying交换得到的最小cash数量（滑点保护）
+     *     - 允许使用的交换器地址
+     *     - 交换器需要的额外数据
+     * @param providerOffer 要使用的provider NFT地址和流动性报价ID
+     * @return loanId 代表借贷的NFT的ID
+     * @return providerId 配对的CollarProviderNFT的ID
+     * @return loanAmount 以cash资产计的实际借贷金额
      */
     function openLoan(
-        uint underlyingAmount,
-        uint minLoanAmount,
-        SwapParams calldata swapParams,
-        ProviderOffer calldata providerOffer
+        uint underlyingAmount,        // 用户要抵押的underlying资产数量
+        uint minLoanAmount,           // 用户可接受的最小借贷金额
+        SwapParams calldata swapParams,   // 交换参数，包含滑点保护等
+        ProviderOffer calldata providerOffer  // 选择的流动性提供者报价
     ) external returns (uint loanId, uint providerId, uint loanAmount) {
+        // 创建一个空的托管报价结构体，表示不使用托管
         EscrowOffer memory noEscrow = EscrowOffer(EscrowSupplierNFT(address(0)), 0);
+        
+        // 调用内部函数_openLoan，传入false表示不使用托管
         return _openLoan(underlyingAmount, minLoanAmount, swapParams, providerOffer, false, noEscrow, 0);
     }
 
@@ -385,16 +405,31 @@ contract LoansNFT is ILoansNFT, BaseNFT {
 
     // ----- INTERNAL MUTATIVE ----- //
 
-    /// @dev handles both escrow and non-escrow loans
+    /**
+     * @notice 内部函数：处理托管和非托管借贷的核心逻辑
+     * @param underlyingAmount 要抵押的underlying资产数量
+     * @param minLoanAmount 可接受的最小借贷金额
+     * @param swapParams 交换参数
+     * @param providerOffer 流动性提供者报价
+     * @param usesEscrow 是否使用托管服务
+     * @param escrowOffer 托管报价信息
+     * @param escrowFees 托管费用
+     * @return loanId 借贷NFT的ID
+     * @return providerId 配对的provider NFT的ID
+     * @return loanAmount 实际借贷金额
+     */
     function _openLoan(
-        uint underlyingAmount,
-        uint minLoanAmount,
-        SwapParams calldata swapParams,
-        ProviderOffer calldata providerOffer,
-        bool usesEscrow,
-        EscrowOffer memory escrowOffer,
-        uint escrowFees
+        uint underlyingAmount,        
+        uint minLoanAmount,           
+        SwapParams calldata swapParams,   
+        ProviderOffer calldata providerOffer, 
+        bool usesEscrow,              
+        EscrowOffer memory escrowOffer,   
+        uint escrowFees               
     ) internal returns (uint loanId, uint providerId, uint loanAmount) {
+        
+        // 检查当前合约是否被授权为指定资产对开启借贷
+        // 这是第一层权限检查，确保合约本身有权限操作
         require(
             configHub.canOpenPair(address(underlying), address(cashAsset), address(this)),
             "loans: unsupported loans"
@@ -405,47 +440,64 @@ contract LoansNFT is ILoansNFT, BaseNFT {
         // sanitize escrowFee in case usesEscrow is false.
         // Redundant since depends on internal logic, but more consistent with rest of escrow logic
         escrowFees = usesEscrow ? escrowFees : 0;
-        // @dev pull underlyingAmount and escrowFee
+        // stack too deep        
+        // 这是第一步：用户将资产存入合约
         underlying.safeTransferFrom(msg.sender, address(this), underlyingAmount + escrowFees);
 
-        // handle optional escrow, must be done first, to use "supplier's" underlying in swap
+        // handle optional escrow, must be done first, to use "supplier's" underlying in swap        // 处理可选的托管服务，必须在交换之前完成
+        // in case of escrow 返回托管NFT合约地址和托管ID
         (EscrowSupplierNFT escrowNFT, uint escrowId) =
             _conditionalOpenEscrow(usesEscrow, underlyingAmount, escrowOffer, escrowFees);
-
         // stack too deep
+        // 使用代码块避免"stack too deep"错误, Solidity有16个局部变量的限制
         {
-            uint takerId;
+            uint takerId; 
             // @dev Reentrancy assumption: no user manipulable state writes or reads BEFORE this call due to
             // potential untrusted calls during swapping, The only exception is taker.nextPositionId(), which
-            // is why escrow's loanId is later validated in _escrowValidations.
+            // is why escrow's loanId is later validated in _escrowValidations.            
+            
+            // 执行交换和创建Collar头寸的核心逻辑
+            // 返回：takerId, providerId, 实际借贷金额
             (takerId, providerId, loanAmount) =
                 _swapAndMintCollar(underlyingAmount, providerOffer, swapParams);
-            // despite the swap slippage check, explicitly check loanAmount, to avoid coupling and assumptions
+            // despite the swap slippage check, explicitly check loanAmount, to avoid coupling and assumptions            
+            // 尽管有交换滑点检查，仍然明确检查借贷金额
+            // 这是为了避免耦合和假设，确保借贷金额满足用户要求
             require(loanAmount >= minLoanAmount, "loans: loan amount too low");
-
             // validate loanId
+            // 验证借贷ID，确保ID唯一性
             loanId = _newLoanIdCheck(takerId);
         }
-
         // @dev these checks can only be done in the end of _openLoan, after both escrow and taker
         // positions exist
+        // 注释说明：这些检查只能在_openLoan结束时进行
+        // 因为需要等到托管和taker头寸都存在后才能验证
         if (usesEscrow) _escrowValidations(loanId, escrowNFT, escrowId);
 
         // store the loan opening data
+        // 存储借贷开启的数据到存储映射中
+        // 这些数据用于后续的借贷管理操作
         loans[loanId] = LoanStored({
-            underlyingAmount: underlyingAmount,
-            loanAmount: loanAmount,
-            usesEscrow: usesEscrow,
-            escrowNFT: escrowNFT,
-            escrowId: SafeCast.toUint64(escrowId)
-        });
+            underlyingAmount: underlyingAmount,    // 原始抵押的underlying数量
+            loanAmount: loanAmount,                // 实际借贷金额
+            usesEscrow: usesEscrow,                // 是否使用托管
+            escrowNFT: escrowNFT,                  // 托管NFT合约地址
+            escrowId: SafeCast.toUint64(escrowId) // 托管ID，转换为64位无符号整数
+         });
 
         // mint the loan NFT to the borrower, keep the taker NFT (with the same ID) in this contract
+        // 将借贷NFT铸造给借款人
+        // 同时将taker NFT（具有相同ID）保留在合约中
+        // 注释说明：不使用_safeMint以避免重入攻击
         _mint(msg.sender, loanId); // @dev does not use _safeMint to avoid reentrancy
 
         // transfer the full loan amount on open
+        // 在开启时转移全部借贷金额给用户
+        // 用户立即获得借到的cash资产
         cashAsset.safeTransfer(msg.sender, loanAmount);
 
+        // 发出借贷开启事件，记录所有关键信息
+        // 包括借贷ID、借款人地址、抵押数量、借贷金额、托管状态等
         emit LoanOpened(
             loanId, msg.sender, underlyingAmount, loanAmount, usesEscrow, escrowId, address(escrowNFT)
         );
@@ -486,7 +538,9 @@ contract LoansNFT is ILoansNFT, BaseNFT {
         However, allowing extreme manipulation (self-sandwich) can introduce edge-cases, for example
         by taking a large escrow amount, but only a small collar position, which can violate some
         implicit integration assumptions. */
+        // 确保交换价格与Oracle价格差异不超过10%
         _checkSwapPrice(cashFromSwap, underlyingAmount);
+
 
         // split the cash to loanAmount and takerLocked
         // this uses LTV === put strike percent, so the loan is the pre-exercised put (sent to user)
@@ -525,21 +579,33 @@ contract LoansNFT is ILoansNFT, BaseNFT {
      * @dev reentrancy assumption 2: contract does not hold funds. If the contract is changed to
      * hold funds at rest, and swap is allowed to reenter a method that increases funds at rest,
      * there can be a risk of double-counting - in that method, and in the balance update check below.
+     * 
+     * @notice 内部交换函数：执行资产交换逻辑，包含余额和滑点检查
+     * @dev 重入攻击假设1：_swap在内部用户状态写入或读取之前或之后调用
+     * 这样如果有重入攻击（例如通过多跳路由中的恶意代币），它无法利用任何不一致的状态
+     * @dev 重入攻击假设2：合约不持有资金。如果合约被改为持有资金，且交换被允许重入增加资金的方法
+     * 可能存在重复计算的风险 - 在该方法中，以及下面的余额更新检查中
      */
     function _swap(IERC20 assetIn, IERC20 assetOut, uint amountIn, SwapParams calldata swapParams)
         internal
         returns (uint amountOut)
     {
         // check swapper allowed
+        // 检查交换器是否被允许使用
         require(isAllowedSwapper(swapParams.swapper), "loans: swapper not allowed");
 
         // @dev 0 amount swaps may revert (depending on swapper), short-circuit here instead of in
         // swappers to: reduce surface area for integration issues.
+        // 0金额交换可能会回滚（取决于交换器），在这里短路而不是在交换器中
+        // 目的是：减少集成问题的表面积
         if (amountIn == 0) {
             amountOut = 0;
         } else {
+            // 记录交换前的余额，用于后续验证
             uint balanceBefore = assetOut.balanceOf(address(this));
+            
             // approve the swapper
+            // 授权交换器使用输入资产
             assetIn.forceApprove(swapParams.swapper, amountIn);
 
             /* @dev It may be tempting to simplify this by using an arbitrary call instead of a
@@ -553,18 +619,34 @@ contract LoansNFT is ILoansNFT, BaseNFT {
             is not known), so would require first settling, and then closing.
 
             The interface still allows arbitrary complexity via the extraData field if needed.
+            
+            注释：使用特定接口ISwapper而不是任意调用的原因：
+            1. 使用特定接口更安全，因为它使窃取授权变得不可能。这比仅依赖白名单更安全。
+            2. 交换的任意调用载荷更难构造和检查，所以需要前端更多的用户信任。
+            3. 交换的amountIn需要链下精确计算，在关闭借贷时如果头寸尚未结算（因此确切提取金额未知）
+               这会成问题，所以需要先结算，然后关闭。
+            
+            接口仍然通过extraData字段允许任意复杂性（如果需要）。
             */
+            
+            // 调用交换器的swap函数执行实际交换
             uint amountOutSwapper = ISwapper(swapParams.swapper).swap(
                 assetIn, assetOut, amountIn, swapParams.minAmountOut, swapParams.extraData
             );
+            
             // Calculate the actual amount received
+            // 计算实际收到的金额（通过余额变化）
             amountOut = assetOut.balanceOf(address(this)) - balanceBefore;
+            
             // check balance is updated as expected and as reported by swapper (no other balance changes)
             // @dev important check for preventing swapper reentrancy (if using e.g., arbitrary call swapper)
+            // 检查余额是否按预期更新，并与交换器报告的数量一致（没有其他余额变化）
+            // 这是防止交换器重入攻击的重要检查（如果使用例如任意调用交换器）
             require(amountOut == amountOutSwapper, "loans: balance update mismatch");
         }
 
         // check amount is as expected by user
+        // 检查金额是否符合用户预期（滑点保护）
         require(amountOut >= swapParams.minAmountOut, "loans: slippage exceeded");
     }
 

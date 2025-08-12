@@ -133,7 +133,7 @@ contract CollarProviderNFT is ICollarProviderNFT, BaseNFT {
      * So when position is created, the offer amount will be reduced by 100 + 10 in this example,
      * with 100 in providerLocked, and 10 sent to protocol fee recipient.
      * @dev fee is set to 0 if recipient is zero because no transfer will be done
-     */
+      */
     function protocolFee(uint providerLocked, uint duration, uint callStrikePercent)
         public
         view
@@ -183,6 +183,7 @@ contract CollarProviderNFT is ICollarProviderNFT, BaseNFT {
      * to the configured protocol fee APR at the time in the ConfigHub. While the max protocol fee
      * APR is limited in ConfigHub, the value may change within the limited range between the time an
      * offer is funded and a position is minted.
+     * 必须在用户执行openLoan之前先执行createOffer！
      * @param callStrikePercent The call strike percent in basis points
      * @param amount The amount of cash asset to offer
      * @param putStrikePercent The put strike percent in basis points
@@ -287,6 +288,7 @@ contract CollarProviderNFT is ICollarProviderNFT, BaseNFT {
         require(configHub.isValidCollarDuration(offer.duration), "provider: unsupported duration");
 
         // calc protocol fee to subtract from offer (on top of amount)
+        // 💰 计算协议费用（基于完整名义价值），并从报价中扣除
         (uint fee, address feeRecipient) =
             protocolFee(providerLocked, offer.duration, offer.callStrikePercent);
 
