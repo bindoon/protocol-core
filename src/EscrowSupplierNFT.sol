@@ -182,12 +182,12 @@ contract EscrowSupplierNFT is IEscrowSupplierNFT, BaseNFT {
      * @return offerId The ID of the created offer
      */
     function createOffer(
-        uint amount,
-        uint duration,
-        uint interestAPR,
-        uint gracePeriod,
-        uint lateFeeAPR,
-        uint minEscrow
+        uint amount,        // 可提供的托管金额
+        uint duration,      // 托管期限
+        uint interestAPR,   // 年化利率
+        uint gracePeriod,   // 宽限期
+        uint lateFeeAPR,    // 逾期费率
+        uint minEscrow      // 最小托管金额
     ) external returns (uint offerId) {
         // sanity checks
         require(interestAPR <= MAX_INTEREST_APR_BIPS, "escrow: interest APR too high");
@@ -263,6 +263,7 @@ contract EscrowSupplierNFT is IEscrowSupplierNFT, BaseNFT {
         returns (uint escrowId)
     {
         // @dev msg.sender auth is checked vs. canOpenPair in _startEscrow
+        // 1. 创建托管记录
         escrowId = _startEscrow(offerId, escrowed, fees, loanId);
 
         // @dev despite the fact that they partially cancel out, so can be done as just fee transfer,
@@ -270,8 +271,10 @@ contract EscrowSupplierNFT is IEscrowSupplierNFT, BaseNFT {
         // The transfer events for the full amounts are needed such that the tokens used for the swap
         // in Loans should be "supplier's", and not "borrower's" from CGT tax laws perspective.
         // transfer "borrower's" funds in
+        // 2. 将用户资产转移到托管合约
         asset.safeTransferFrom(msg.sender, address(this), escrowed + fees);
         // transfer "supplier's" funds out
+        // 3. 将托管资产转移到用户
         asset.safeTransfer(msg.sender, escrowed);
     }
 

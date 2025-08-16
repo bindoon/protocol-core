@@ -242,24 +242,29 @@ contract LoansNFT is ILoansNFT, BaseNFT {
         _burn(loanId);
 
         // @dev will check settle, or try to settle - will revert if cannot settle yet (not expired)
+        // 结算期权头寸并提取资金
         uint takerWithdrawal = _settleAndWithdrawTaker(loanId);
 
         Loan memory loan = getLoan(loanId);
         // full repayment is supported, if funds aren't available for full repayment, cash only
         // settlement is available via unwrapAndCancelLoan()
         uint repayment = loan.loanAmount;
+        // 用户偿还借贷金额
 
         // @dev assumes approval
         cashAsset.safeTransferFrom(borrower, address(this), repayment);
 
+        // 将cash资产交换回underlying资产
         // total cash available
         uint cashAmount = repayment + takerWithdrawal;
         // @dev Reentrancy assumption: no user state writes or reads AFTER the swapper call in _swap.
         uint underlyingFromSwap = _swap(cashAsset, underlying, cashAmount, swapParams);
 
+        // 释放托管资产（如果使用）
         // release escrow if it was used, returning leftover fees if any.
         underlyingOut = _conditionalEndEscrow(loan, underlyingFromSwap);
 
+        // 将underlying资产转移给用户
         underlying.safeTransfer(borrower, underlyingOut);
 
         emit LoanClosed(loanId, msg.sender, borrower, repayment, cashAmount, underlyingFromSwap);
@@ -307,6 +312,7 @@ contract LoansNFT is ILoansNFT, BaseNFT {
         _burn(loanId);
 
         // pull and push NFT and cash, execute roll, emit event
+        // 1. 执行借贷延期
         (uint newTakerId, int _toUser, int rollFee) = _executeRoll(loanId, rollOffer, minToUser);
         toUser = _toUser; // convenience to allow declaring all outputs above
 
@@ -322,6 +328,7 @@ contract LoansNFT is ILoansNFT, BaseNFT {
 
         // switch escrows if escrow was used because collar expiration has changed
         // @dev assumes interest fee approval
+        // 2. 如果使用托管，切换托管服务
         uint newEscrowId = _conditionalSwitchEscrow(prevLoan, newEscrowOfferId, newLoanId, newEscrowFee);
 
         // store the new loan data
@@ -653,13 +660,16 @@ contract LoansNFT is ILoansNFT, BaseNFT {
     function _settleAndWithdrawTaker(uint loanId) internal returns (uint withdrawnAmount) {
         uint takerId = _takerId(loanId);
 
+        // 检查头寸是否已经结算
         // position could have been settled by anyone already
         (, bool settled) = takerNFT.expirationAndSettled(takerId);
         if (!settled) {
             /// @dev this will revert on: too early, no position, calculation issues, ...
+            // 关键：即使期权未到期，也可以强制结算
             takerNFT.settlePairedPosition(takerId);
         }
 
+        // 提取结算后的资金
         /// @dev because taker NFT is held by this contract, this could not have been called already
         withdrawnAmount = takerNFT.withdrawFromSettled(takerId);
     }
@@ -733,7 +743,9 @@ contract LoansNFT is ILoansNFT, BaseNFT {
             );
 
             // @dev underlyingAmount and fee were pulled already before calling this method
+            // 1. 用户将资产转移到托管合约
             underlying.forceApprove(address(escrowNFT), escrowed + fees);
+            // 2. 开始托管服务， 内部会执行资产转移
             escrowId = escrowNFT.startEscrow({
                 offerId: offer.id,
                 escrowed: escrowed,

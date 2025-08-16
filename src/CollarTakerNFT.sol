@@ -256,6 +256,7 @@ contract CollarTakerNFT is ICollarTakerNFT, BaseNFT, ReentrancyGuard {
         // @dev this checks position exists
         TakerPosition memory position = getPosition(takerId);
 
+        // 🔑 关键：这里检查期权是否到期
         require(block.timestamp >= position.expiration, "taker: not expired");
         require(!position.settled, "taker: already settled");
 
@@ -275,6 +276,7 @@ contract CollarTakerNFT is ICollarTakerNFT, BaseNFT, ReentrancyGuard {
         // expected balance change is current-balance + withdrawable - takerLocked
         uint expectedBalance = cashAsset.balanceOf(address(this)) + takerBalance - position.takerLocked;
         // call provider side
+        // 通过provider合约结算配对头寸
         providerNFT.settlePosition(providerId, providerDelta);
         // check balance update to prevent reducing resting balance
         require(cashAsset.balanceOf(address(this)) == expectedBalance, "taker: settle balance mismatch");

@@ -259,10 +259,188 @@ function _openLoan(...) {
 ```
 
 #### 3.1.3 托管借贷流程
-在标准流程基础上，增加托管层：
-- 用户资产存入EscrowSupplierNFT
-- 使用托管方的资产进行交换
-- 到期时通过托管系统归还
+
+托管借贷是Votre协议的重要特性，主要目的是**税务优化**，通过资产所有权转移来延迟资本利得税。
+
+**托管机制的核心流程**：
+
+#### **阶段1：托管服务商创建报价**
+```solidity:src/EscrowSupplierNFT.sol
+// 托管服务商创建托管报价
+function createOffer(
+    uint amount,        // 可提供的托管金额
+    uint duration,      // 托管期限
+    uint interestAPR,   // 年化利率
+    uint gracePeriod,   // 宽限期
+    uint lateFeeAPR,    // 逾期费率
+    uint minEscrow      // 最小托管金额
+) external returns (uint offerId)
+```
+
+#### **阶段2：用户开启托管借贷**
+```solidity:src/LoansNFT.sol
+function openEscrowLoan(
+    uint underlyingAmount,    // 要托管的资产数量
+    uint minLoanAmount,       // 最小借贷金额
+    SwapParams calldata swapParams,
+    ProviderOffer calldata providerOffer,
+    EscrowOffer calldata escrowOffer,  // 托管报价
+    uint escrowFees           // 托管费用
+) external returns (uint loanId, uint providerId, uint loanAmount)
+```
+
+#### **阶段3：托管资产交换和借贷执行**
+```solidity:src/LoansNFT.sol
+function _conditionalOpenEscrow(bool usesEscrow, uint escrowed, EscrowOffer memory offer, uint fees)
+    internal returns (EscrowSupplierNFT escrowNFT, uint escrowId)
+{
+    if (usesEscrow) {
+        // 1. 用户将资产转移到托管合约
+        underlying.forceApprove(address(escrowNFT), escrowed + fees);
+        
+        // 2. 开始托管服务
+        escrowId = escrowNFT.startEscrow({
+            offerId: offer.id,
+            escrowed: escrowed,
+            fees: fees,
+            loanId: takerNFT.nextPositionId()
+        });
+        
+        // 3. 🔑 关键步骤：托管服务商给用户等额资产用于借贷
+        // 这样用户就可以用托管方的资产去借贷协议获得USDT
+    }
+}
+```
+
+**托管的核心机制**：
+```solidity:src/EscrowSupplierNFT.sol
+function startEscrow(uint offerId, uint escrowed, uint fees, uint loanId)
+    external returns (uint escrowId)
+{
+    // 1. 创建托管记录
+    escrowId = _startEscrow(offerId, escrowed, fees, loanId);
+
+    // 2. 将用户资产转移到托管合约
+    asset.safeTransferFrom(msg.sender, address(this), escrowed + fees);
+    
+    // 3. 🔑 关键：托管服务商给用户等额资产
+    asset.safeTransfer(msg.sender, escrowed);
+}
+```
+
+**完整的资金流向**：
+```
+用户账户：
+├── 原始ETH: 100 ETH
+├── 费用: 5 ETH
+└── 托管后: 0 ETH
+
+LoansNFT合约：
+├── 收到用户: 100 ETH + 5 ETH费用
+├── 转移给托管合约: 100 ETH + 5 ETH费用
+└── 从托管合约收到: 100 ETH (用于后续交换)
+
+托管合约：
+├── 收到: 100 ETH + 5 ETH费用 (来自LoansNFT)
+├── 从托管服务商offer扣除: 100 ETH
+└── 转移给LoansNFT: 100 ETH
+
+托管服务商offer：
+├── 原始金额: 1000 ETH
+├── 扣除托管: 100 ETH
+└── 剩余: 900 ETH
+```
+
+**托管与标准借贷的区别**：
+
+| 方面 | 标准借贷 | 托管借贷 |
+|------|----------|----------|
+| 资产使用 | 直接使用用户资产 | 使用托管服务商的资产 |
+| 税务影响 | 可能触发资本利得税 | 延迟税务义务 |
+| 费用结构 | 仅期权费用 | 期权费用 + 托管费用 |
+| 资产控制 | 用户完全控制 | 托管期间由托管方保管 |
+| 适用场景 | 一般用户 | 高净值个人、机构用户 |
+
+**托管的税务优势**：
+
+1. **资本利得税延迟**：
+   - 用户资产被托管，不构成"处置"
+   - 使用托管方的资产进行借贷，避免税务触发
+   - 托管期间不产生资本利得税义务
+
+2. **不同司法管辖区的适用性**：
+   - **美国（IRS）**：托管期间不构成资产处置
+   - **英国（HMRC）**：托管费用可作为业务费用扣除
+   - **新加坡（IRAS）**：主要优势在于资产安全和合规性
+
+**托管费用结构**：
+```solidity:src/EscrowSupplierNFT.sol
+// 费用限制
+uint public constant MAX_INTEREST_APR_BIPS = BIPS_BASE;        // 100% APR
+uint public constant MAX_LATE_FEE_APR_BIPS = BIPS_BASE * 12;  // 1200% APR
+uint public constant MIN_GRACE_PERIOD = 1 days;               // 最小宽限期
+uint public constant MAX_GRACE_PERIOD = 30 days;              // 最大宽限期
+```
+
+**托管生命周期管理**：
+
+#### **托管开始**：
+- 用户存入资产 + 费用
+- 托管服务商提供等额资产给用户使用
+- 创建托管记录和NFT
+
+#### **托管期间**：
+- 用户使用托管方的资产进行借贷
+- 托管服务商收取利息费用
+- 用户资产安全保管
+
+#### **托管结束**：
+- 用户偿还借贷
+- 托管合约释放用户原始资产
+- 托管服务商获得费用收入
+
+#### **托管切换**（借贷延期时）：
+```solidity:src/LoansNFT.sol
+function _conditionalSwitchEscrow(Loan memory prevLoan, uint offerId, uint newLoanId, uint newFees)
+    internal returns (uint newEscrowId)
+{
+    if (prevLoan.usesEscrow) {
+        // 1. 结束旧托管
+        // 2. 开始新托管
+        // 3. 处理费用差异
+    }
+}
+```
+
+**实际业务场景示例**：
+
+**用户Alice的托管借贷流程**：
+```
+Alice有100 ETH，想要获得USDT贷款：
+
+1. 托管阶段：
+   - Alice将100 ETH + 5 ETH费用存入托管合约
+   - 托管服务商Bob提供100 ETH给Alice使用
+   - Alice的100 ETH被安全托管
+
+2. 借贷阶段：
+   - Alice用Bob提供的100 ETH去借贷协议
+   - 获得80,000 USDT贷款（假设LTV=80%）
+   - 创建期权头寸对冲风险
+
+3. 到期还款：
+   - Alice偿还80,000 USDT
+   - 借贷协议将USDT交换回100 ETH
+   - 托管合约释放Alice原始托管的100 ETH
+   - Bob获得5 ETH费用收入
+```
+
+**托管机制的核心价值**：
+- ✅ **税务优化**：延迟资本利得税
+- ✅ **资产安全**：专业托管服务
+- ✅ **合规性**：符合监管要求
+- ✅ **灵活性**：支持托管切换和延期
+- ✅ **风险隔离**：用户资产与借贷风险分离
 
 ### 3.2 借贷延期（Rolling）流程
 
@@ -518,20 +696,6 @@ uint maxTakerGain = providerLocked;  // 最大收益 = provider锁定的资金
 - 更多资产对支持
 - 移动端应用
 - 自动化策略工具
-
-## 11. 常见问题解答
-
-### 11.1 为什么称为"期权"？
-Votre协议中的"期权"实际上是通过数学计算和资金锁定来模拟的，而不是传统意义上的期权交易。这是一种风险对冲策略，通过预先锁定资金来消除清算风险。
-
-### 11.2 如何避免清算风险？
-通过"预先交换"机制：资产在开仓时即完成交换，期权策略限制最大损失，所有风险都在开仓时被精确计算和对冲。
-
-### 11.3 费用是如何收取的？
-协议费用从provider的报价金额中扣除，由provider承担，不是平台垫付。费用基于完整的名义价值计算。
-
-### 11.4 价格跌破put行权价怎么办？
-结算价格被限制在put行权价之上，taker的最大损失就是锁定的资金，风险完全可控。
 
 ---
 
